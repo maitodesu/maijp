@@ -162,11 +162,11 @@ pub fn kanji_card(s: &State) -> El {
             .child(text(word.m.clone()).font(SMALL).color(W.alpha(0.6)).grow(1.0).min_w(0.0).truncate())
             .child(text(score).font(SMALL).color(W.alpha(0.5)))
     }).collect::<Vec<_>>();
-    let deck: Vec<Card> = KANJI_WORDS[i].iter().map(|&w| Card::Word(w)).collect();
+    let deck: Vec<Card> = top_words(i, |_| true).into_iter().map(Card::Word).collect();
     let drill = if deck.is_empty() {
         text("No vocab for this kanji yet").font(SMALL).color(W.alpha(0.5))
     } else {
-        button("study-drill", &format!("Drill its words ({})", deck.len()), true, move |s: &mut State| {
+        button("study-drill", &format!("Drill its top {} words", deck.len()), true, move |s: &mut State| {
             s.study_open = None;
             s.drill = Drill::Vocab;
             start(s, deck.clone());

@@ -167,12 +167,22 @@ fn advance(s: &mut State, right: bool) {
 
 fn level_on(s: &State, n: u8) -> bool { s.levels[5 - n as usize] }
 
+/// Words drilled per kanji: its most-used ones (WORDS is sorted by frequency).
+const TOP_WORDS: usize = 3;
+
+fn top_words(k: usize, keep: impl Fn(usize) -> bool) -> Vec<usize> {
+    vocab::KANJI_WORDS[k].iter().copied().filter(|&w| keep(w)).take(TOP_WORDS).collect()
+}
+
 fn full_deck(s: &State) -> Vec<Card> {
     if s.drill == Drill::Vocab {
         let any_picked = s.picked.contains(&true);
-        return WORDS.iter().enumerate()
-            .filter(|(_, w)| level_on(s, w.level) && (!any_picked || w.kanji.iter().any(|&k| s.picked[k])))
-            .map(|(i, _)| Card::Word(i)).collect();
+        let mut seen = std::collections::HashSet::new();
+        return KANJI.iter().enumerate()
+            .filter(|(k, kj)| level_on(s, kj.n) && (!any_picked || s.picked[*k]))
+            .flat_map(|(k, _)| top_words(k, |w| level_on(s, WORDS[w].level)))
+            .filter(|w| seen.insert(*w))
+            .map(Card::Word).collect();
     }
     let scripts: &[bool] = match s.script { 0 => &[false], 1 => &[true], _ => &[false, true] };
     TABLE.iter().enumerate().filter(|(_, k)| s.sets[k.set])
@@ -684,6 +694,9 @@ mod tests {
         let some = full_deck(&s);
         assert!(!some.is_empty() && some.len() < all);
         assert!(some.iter().all(|c| matches!(c, Card::Word(i) if WORDS[*i].kanji.contains(&k))));
+        // Only the 3 most-used words, in frequency order.
+        let want: Vec<Card> = vocab::KANJI_WORDS[k].iter().take(3).map(|&w| Card::Word(w)).collect();
+        assert_eq!(some, want);
     }
 
     #[test]
