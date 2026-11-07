@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=maijp
+GenericName=Japanese typing drills
+Comment=Drill kana and JLPT vocab by typing fast
+Exec=maijp
+Icon=dev.maitodesu.maijp
+Terminal=false
+Categories=Education;Languages;
+StartupWMClass=dev.maitodesu.maijp

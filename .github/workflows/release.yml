@@ -33,11 +33,27 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
+          bin=target/${{ matrix.target }}/release
+          mkdir -p pkg
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "$GITHUB_WORKSPACE/${{ matrix.name }}" maijp.exe
+            # The icon is embedded in maijp.exe by build.rs.
+            7z a "$GITHUB_WORKSPACE/${{ matrix.name }}" "./$bin/maijp.exe"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            app=pkg/maijp.app/Contents
+            mkdir -p $app/MacOS $app/Resources maijp.iconset
+            cp $bin/maijp $app/MacOS/
+            version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+            sed "s/VERSION/$version/g" packaging/Info.plist > $app/Info.plist
+            for n in 16 32 128 256 512; do
+              sips -z $n $n assets/icon/maijp.png --out maijp.iconset/icon_${n}x${n}.png
+              sips -z $((n*2)) $((n*2)) assets/icon/maijp.png --out maijp.iconset/icon_${n}x${n}@2x.png
+            done
+            iconutil -c icns maijp.iconset -o $app/Resources/maijp.icns
+            tar czf "$GITHUB_WORKSPACE/${{ matrix.name }}" -C pkg maijp.app
           else
-            tar czf "$GITHUB_WORKSPACE/${{ matrix.name }}" maijp
+            cp $bin/maijp packaging/dev.maitodesu.maijp.desktop packaging/install.sh pkg/
+            cp assets/icon/maijp-512.png pkg/maijp.png
+            tar czf "$GITHUB_WORKSPACE/${{ matrix.name }}" -C pkg .
           fi
       - uses: actions/upload-artifact@v4
         with:

@@ -1,11 +1,13 @@
 //! maijp: kana and JLPT vocab speed-typing drills on Rune.
 //! `cargo run` opens it; `cargo run -- --snap out.png --scene play` renders headless.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::f32::consts::PI;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use rune::{AppSpec, Color, Cx, El, Family, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row, text};
+use rune::{AppSpec, Color, Cx, El, Family, Key, KeyEvent, Pixels, ScrollSpec, SurfaceFit, TextStyle, Tx, col, el, row, text};
 
 mod store;
 mod study;
@@ -71,7 +73,7 @@ const ROUNDS: [usize; 4] = [20, 50, 100, usize::MAX];
 const LIMITS: [f64; 5] = [30.0, 60.0, 120.0, 300.0, f64::INFINITY];
 /// (label, family): UI fonts are bundled; JP fonts are the system CJK faces rune loads.
 const UI_FONTS: [(&str, &str); 3] = [("Geist", "Geist"), ("Inter", "Inter"), ("Geist Mono", "Geist Mono")];
-const JP_FONTS: [(&str, &str); 2] = [("Noto Sans", "Noto Sans CJK JP"), ("Noto Serif", "Noto Serif CJK JP")];
+const JP_FONTS: [(&str, &str); 2] = [("Noto Sans", "Noto Sans JP"), ("Noto Serif", "Noto Serif JP")];
 
 struct State {
     screen: Screen,
@@ -103,6 +105,8 @@ struct State {
     ui_font: usize,
     jp_font: usize,
     fonts_open: bool,
+    /// THEMES index: follow the system, light or dark.
+    theme: usize,
     prefs: Prefs,
     progress: Progress,
     /// Settings as last written, so poll only saves real changes.
@@ -114,6 +118,8 @@ struct State {
     study_level: u8,
     /// Kanji whose detail card is open.
     study_open: Option<usize>,
+    /// Draw only the app icon (the `icon` scene renders it for packaging).
+    icon: bool,
 }
 
 fn init() -> State {
@@ -122,15 +128,15 @@ fn init() -> State {
         picked: vec![false; KANJI.len()], pick_open: false, script: 0, sets: [true, false, false], limit: 1, deck: Vec::new(), pos: 0,
         input: String::new(), wrong: false, swallow_n: false, keys: 0, bad_keys: 0, skips: 0, missed: Vec::new(),
         started: 0.0, now: 0.0, ended: 0.0, cleared: false, seed,
-        ui_font: 0, jp_font: 0, fonts_open: false,
+        ui_font: 0, jp_font: 0, fonts_open: false, theme: 0,
         prefs: Prefs::memory(), progress: Progress::default(), saved: Settings::default(), fonts_applied: false,
-        study_tab: 0, study_kata: false, study_level: 5, study_open: None }
+        study_tab: 0, study_kata: false, study_level: 5, study_open: None, icon: false }
 }
 
 fn settings(s: &State) -> Settings {
     Settings { script: s.script, sets: s.sets, limit: s.limit, levels: s.levels, round: s.round,
         picked: s.picked.iter().enumerate().filter(|(_, on)| **on).map(|(i, _)| KANJI[i].c.clone()).collect(),
-        ui_font: s.ui_font, jp_font: s.jp_font }
+        ui_font: s.ui_font, jp_font: s.jp_font, theme: s.theme }
 }
 
 /// Loads what was saved last time. Indexes are clamped: an older build may have had fewer options.
@@ -147,6 +153,7 @@ fn setup(s: &mut State, _: Waker) {
     for c in &st.picked { if let Some(i) = KANJI.iter().position(|k| &k.c == c) { s.picked[i] = true } }
     s.ui_font = st.ui_font.min(UI_FONTS.len() - 1);
     s.jp_font = st.jp_font.min(JP_FONTS.len() - 1);
+    s.theme = st.theme.min(THEMES.len() - 1);
     s.saved = settings(s);
     s.progress = s.prefs.get("progress").unwrap_or_default();
 }
@@ -297,64 +304,119 @@ fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
 }
 
 // ---------- look ----------
+/// `0xRRGGBB` as written in design tools (sRGB) to Rune's linear colour. Polynomial fit of the sRGB curve, so it can stay const.
 const fn rgb(h: u32) -> Color {
-    Color { r: ((h >> 16) & 255) as f32 / 255.0, g: ((h >> 8) & 255) as f32 / 255.0, b: (h & 255) as f32 / 255.0, a: 1.0 }
+    const fn lin(c: u32) -> f32 { let c = c as f32 / 255.0; c * (c * (c * 0.305_306 + 0.682_171) + 0.012_523) }
+    Color { r: lin((h >> 16) & 255), g: lin((h >> 8) & 255), b: lin(h & 255), a: 1.0 }
 }
-const W: Color = Color::WHITE;
-const INK: Color = rgb(0x120E24);
-const SAKURA: Color = rgb(0xFF8FB1);
-const SHU: Color = rgb(0xFF5A4E);
-const MATCHA: Color = rgb(0x7FE0A8);
+const ACCENT: Color = rgb(0xF2602F);
+const SHU: Color = rgb(0xFF4D3D);
+const MATCHA: Color = rgb(0x5FD49A);
 
-const HERO: TextStyle = TextStyle::new(34.0, 600.0).tracking(-0.8);
+/// Light or dark for this frame. A global so the small style helpers needn't take State;
+/// view() sets it first thing, and only the UI thread reads it.
+static LIGHT: AtomicBool = AtomicBool::new(false);
+fn light() -> bool { LIGHT.load(Ordering::Relaxed) }
+/// Text and lines.
+fn fg() -> Color { if light() { rgb(0x111014) } else { rgb(0xF4F1EC) } }
+/// Text on an fg-filled control.
+fn inv() -> Color { if light() { rgb(0xF6F3EE) } else { rgb(0x0B0B0D) } }
+fn surface() -> Color { if light() { rgb(0xFBF9F5).alpha(0.96) } else { rgb(0x0E0E11).alpha(0.94) } }
+fn scrim() -> Color { Color::BLACK.alpha(if light() { 0.22 } else { 0.6 }) }
+
+const THEMES: [&str; 3] = ["Auto", "Light", "Dark"];
+const SERIF: &str = "Instrument Serif";
+fn hero() -> TextStyle { TextStyle::new(54.0, 400.0).family(Family::Named(SERIF)).tracking(-0.6).lh(56.0) }
+fn num() -> TextStyle { TextStyle::new(40.0, 400.0).family(Family::Named(SERIF)) }
 fn jp(s: &State, size: f32) -> TextStyle { TextStyle::new(size, 400.0).family(Family::Named(JP_FONTS[s.jp_font].1)) }
-const BODY: TextStyle = TextStyle::new(15.0, 500.0);
-const SMALL: TextStyle = TextStyle::new(13.0, 500.0);
-const CAPS: TextStyle = TextStyle::new(11.0, 600.0).tracking(1.0);
-const NUM: TextStyle = TextStyle::new(30.0, 400.0).tracking(-0.8);
+const BODY: TextStyle = TextStyle::new(15.0, 400.0);
+const SMALL: TextStyle = TextStyle::new(13.0, 400.0);
+const CAPS: TextStyle = TextStyle::new(11.0, 500.0).tracking(1.4);
 const TYPED: TextStyle = TextStyle::new(28.0, 400.0).mono();
 
-fn glass() -> El {
-    col().radius(24.0).backdrop_blur(24.0)
-        .fill(W.alpha(0.07))
-        .linear_gradient(PI, [(0.0, W.alpha(0.14)), (0.5, W.alpha(0.03)), (1.0, W.alpha(0.06))])
-        .border(1.0, W.alpha(0.18))
-        .shadow(20.0, 44.0, Color::BLACK.alpha(0.3))
-        .padding(22.0)
+/// Grain-stippled colour fields on black (or paper), drawn once per theme: the static "grainient".
+static BG: LazyLock<[Pixels; 2]> = LazyLock::new(|| [grainient(false), grainient(true)]);
+
+fn grainient(light: bool) -> Pixels {
+    const W: usize = 1440;
+    const H: usize = 1200;
+    // Top and bottom of the base wash: ink-blue night, or warm paper.
+    let (top, bottom) = if light { (0xF6F3EE, 0xEFE9E2) } else { (0x0D0C17, 0x17111F) };
+    // (centre x, y, radius x, y) in 0..1 of the image, core colour, edge colour, strength.
+    let blobs: [([f32; 4], u32, u32, f32); 4] = [
+        ([1.0, 1.0, 0.85, 0.80], 0xFFB066, 0xE8452C, 0.95), // 朱: lower right
+        ([0.0, 0.0, 0.70, 0.62], 0x7D93FF, 0x4A2BC2, 0.90), // 藍: upper left
+        ([0.20, 1.05, 0.55, 0.38], 0xFF8DBA, 0x9B3FD8, 0.60), // 桜: low left
+        ([1.0, 0.25, 0.45, 0.40], 0xB79BFF, 0x6A4BD8, 0.40), // 藤: right, faint
+    ];
+    let c = |h: u32| [((h >> 16) & 255) as f32 / 255.0, ((h >> 8) & 255) as f32 / 255.0, (h & 255) as f32 / 255.0];
+    let (t, b) = (c(top), c(bottom));
+    let mut out = vec![0u8; W * H * 4];
+    for y in 0..H {
+        for x in 0..W {
+            let (u, v) = (x as f32 / W as f32, y as f32 / H as f32);
+            let mut px = [0.0; 3];
+            for i in 0..3 { px[i] = t[i] + (b[i] - t[i]) * v }
+            for ([cx, cy, rx, ry], core, edge, strength) in &blobs {
+                let d = (((u - cx) / rx).powi(2) + ((v - cy) / ry).powi(2)).sqrt();
+                if d >= 1.0 { continue }
+                let f = 1.0 - d;
+                let a = f * f * (3.0 - 2.0 * f) * strength * if light { 0.75 } else { 1.0 }; // smoothstep: no hard rim
+                let (k, e) = (c(*core), c(*edge));
+                for i in 0..3 { px[i] += ((k[i] + (e[i] - k[i]) * d) - px[i]) * a }
+            }
+            // Fine film grain: a few levels of noise per pixel, enough to break banding, not to speckle.
+            let mut h = (y * W + x) as u32;
+            h ^= h >> 16; h = h.wrapping_mul(0x7FEB_352D); h ^= h >> 15; h = h.wrapping_mul(0x846C_A68B); h ^= h >> 16;
+            let grain = (h as f32 / u32::MAX as f32 - 0.5) * 0.045;
+            let o = (y * W + x) * 4;
+            for i in 0..3 { out[o + i] = ((px[i] + grain).clamp(0.0, 1.0) * 255.0) as u8 }
+            out[o + 3] = 255;
+        }
+    }
+    let p = Pixels::new();
+    p.set(W as u32, H as u32, out);
+    p
 }
 
-fn caps(t: &str) -> El { text(t.to_uppercase()).font(CAPS).color(W.alpha(0.55)) }
+fn glass() -> El {
+    // Frosted, barely: the blur does the work, the tint only lifts the text off the colour.
+    col().radius(22.0).backdrop_blur(36.0)
+        .fill(if light() { Color::WHITE.alpha(0.38) } else { Color::WHITE.alpha(0.045) })
+        .border(1.0, if light() { Color::WHITE.alpha(0.7) } else { Color::WHITE.alpha(0.09) })
+        .padding(24.0)
+}
+
+fn caps(t: &str) -> El { text(t.to_uppercase()).font(CAPS).color(fg().alpha(0.5)) }
 
 fn chip(key: String, label: &str, on: bool, press: impl Fn(&mut State) + 'static) -> El {
     chip_in(key, label, SMALL, on, move |s: &mut State, _: &mut Tx| press(s))
 }
 
 fn chip_in(key: String, label: &str, font: TextStyle, on: bool, press: impl Fn(&mut State, &mut Tx) + 'static) -> El {
-    row().key(key).role("button").label(label.to_string()).focusable(true).h(36.0).px(16.0).center().radius(18.0)
-        .fill(if on { W.alpha(0.94) } else { W.alpha(0.08) })
-        .border(1.0, W.alpha(if on { 0.0 } else { 0.18 }))
+    row().key(key).role("button").label(label.to_string()).focusable(true).h(34.0).px(15.0).center().radius(17.0)
+        .fill(if on { fg() } else { fg().alpha(0.04) })
+        .border(1.0, fg().alpha(if on { 0.0 } else { 0.12 }))
         .press_scale(0.96).on_press_tx(press)
-        .child(text(label.to_string()).font(font).color(if on { INK } else { W }))
+        .child(text(label.to_string()).font(font).color(if on { inv() } else { fg().alpha(0.85) }))
 }
 
 fn button(key: &str, label: &str, primary: bool, press: impl Fn(&mut State) + 'static) -> El {
     let b = row().key(key.to_string()).role("button").label(label.to_string()).focusable(true).h(46.0).px(26.0).center().radius(23.0)
         .press_scale(0.97).on_press(press);
     if primary {
-        b.linear_gradient(PI / 2.0, [(0.0, rgb(0xE8433F)), (1.0, rgb(0xD9467E))]).shadow(10.0, 28.0, SHU.alpha(0.45))
-            .child(text(label.to_string()).font(BODY).color(W))
+        b.fill(fg()).child(text(label.to_string()).font(TextStyle::new(15.0, 500.0)).color(inv()))
     } else {
-        b.fill(W.alpha(0.08)).border(1.0, W.alpha(0.2)).child(text(label.to_string()).font(BODY).color(W))
+        b.border(1.0, fg().alpha(0.2)).child(text(label.to_string()).font(BODY).color(fg()))
     }
 }
 
 fn logo(s: &State) -> El {
     row().items_center().gap(10.0)
-        .child(col().size(30.0, 30.0).radius(15.0).center()
-            .radial_gradient([0.35, 0.3], 22.0, [(0.0, rgb(0xFF9A8A)), (1.0, SHU)])
-            .shadow(4.0, 16.0, SHU.alpha(0.5))
-            .child(text("ま").font(TextStyle { weight: 700.0, ..jp(s, 16.0) }).color(W)))
-        .child(text("maijp").font(TextStyle::new(19.0, 600.0).tracking(-0.4)).color(W))
+        // The app icon in small: ま on the dark grain.
+        .child(col().size(30.0, 30.0).radius(8.0).center().pixels_fit(&BG[0], SurfaceFit::Fill)
+            .child(text("ま").font(TextStyle { weight: 500.0, ..jp(s, 18.0) }).color(rgb(0xF4F1EC))))
+        .child(text("maijp").font(TextStyle::new(18.0, 500.0).tracking(-0.4)).color(fg()))
 }
 
 /// 65.2 -> "1 min 5 secs".
@@ -372,6 +434,12 @@ fn clock(secs: f64) -> String {
 }
 
 // ---------- screens ----------
+fn tab(s: &State, label: &str, ja: &str, d: Drill) -> El {
+    let on = s.drill == d;
+    chip(format!("tab-{label}"), label, on, move |s: &mut State| s.drill = d).gap(6.0)
+        .child(text(ja.to_string()).font(jp(s, 13.0)).color(if on { inv() } else { fg().alpha(0.55) }))
+}
+
 fn menu(s: &State) -> El {
     let group = |title: &str, chips: Vec<El>| col().gap(10.0).child(caps(title)).child(row().flex_wrap().gap(8.0).children(chips));
     let scripts = SCRIPTS.iter().enumerate().map(|(i, n)| chip(format!("script-{i}"), n, s.script == i, move |s: &mut State| s.script = i)).collect();
@@ -384,12 +452,12 @@ fn menu(s: &State) -> El {
     let limits = LIMITS.iter().enumerate().map(|(i, l)| chip(format!("limit-{i}"), &clock(*l), s.limit == i, move |s: &mut State| s.limit = i)).collect();
     let n = full_deck(s).len();
     let tabs = row().gap(8.0)
-        .child(chip_in("tab-kana".into(), "Kana  かな", jp(s, 14.0), s.drill == Drill::Kana, |s: &mut State, _: &mut Tx| s.drill = Drill::Kana))
-        .child(chip_in("tab-vocab".into(), "JLPT vocab  漢字", jp(s, 14.0), s.drill == Drill::Vocab, |s: &mut State, _: &mut Tx| s.drill = Drill::Vocab))
-        .child(chip_in("tab-study".into(), "Study  学ぶ", jp(s, 14.0), s.drill == Drill::Study, |s: &mut State, _: &mut Tx| s.drill = Drill::Study));
+        .child(tab(s, "Kana", "かな", Drill::Kana))
+        .child(tab(s, "JLPT vocab", "漢字", Drill::Vocab))
+        .child(tab(s, "Study", "学ぶ", Drill::Study));
     if s.drill == Drill::Study { return study::view(s, tabs) }
     let streak = s.progress.streak(today());
-    let tabs = tabs.child(el().grow(1.0)).child(text(if streak > 0 { format!("{streak}-day streak") } else { String::new() }).font(SMALL).color(SAKURA));
+    let tabs = tabs.child(el().grow(1.0)).child(text(if streak > 0 { format!("{streak}-day streak") } else { String::new() }).font(SMALL).color(ACCENT));
     let (title, sub, panel, count) = if s.drill == Drill::Kana {
         ("Type every kana before the clock runs out.",
          "Romaji in, kana out. No hints: a wrong key flashes red. Space skips (counts as a miss).",
@@ -407,7 +475,7 @@ fn menu(s: &State) -> El {
         let picked = s.picked.iter().enumerate().filter(|(k, on)| **on && level_on(s, KANJI[*k].n)).count();
         let mut pick = row().items_center().gap(10.0)
             .child(chip("pick-open".into(), "Pick kanji…", picked > 0, |s: &mut State| s.pick_open = true))
-            .child(text(if picked == 0 { "All kanji in these levels".to_string() } else { format!("{picked} kanji picked") }).font(SMALL).color(W.alpha(0.6)));
+            .child(text(if picked == 0 { "All kanji in these levels".to_string() } else { format!("{picked} kanji picked") }).font(SMALL).color(fg().alpha(0.6)));
         if picked > 0 {
             pick = pick.child(chip("pick-clear".into(), "Use all", false, |s: &mut State| s.picked.fill(false)));
         }
@@ -424,12 +492,12 @@ fn menu(s: &State) -> El {
     col().w_full().max_w(680.0).gap(24.0)
         .child(tabs.w_full())
         .child(col().gap(8.0)
-            .child(text(title).font(HERO).color(W))
-            .child(text(sub).font(BODY).color(W.alpha(0.6))))
+            .child(text(title).font(hero()).wrap().color(fg()))
+            .child(text(sub).font(BODY).color(fg().alpha(0.6))))
         .child(panel)
         .child(row().items_center().gap(16.0)
             .child(button("start", "Start drill", true, |s: &mut State| { let d = full_deck(s); start(s, d) }))
-            .child(text(count).font(SMALL).color(W.alpha(0.55))))
+            .child(text(count).font(SMALL).color(fg().alpha(0.55))))
 }
 
 fn pick_dialog(s: &State) -> El {
@@ -438,22 +506,22 @@ fn pick_dialog(s: &State) -> El {
         let on = s.picked[i];
         col().key(format!("k-{i}")).role("checkbox").label(format!("{} {}", k.c, k.m)).checked(on).focusable(true)
             .size(44.0, 44.0).radius(12.0).center()
-            .fill(if on { SAKURA.alpha(0.9) } else { W.alpha(0.06) }).border(1.0, W.alpha(if on { 0.0 } else { 0.14 }))
+            .fill(if on { ACCENT.alpha(0.9) } else { fg().alpha(0.06) }).border(1.0, fg().alpha(if on { 0.0 } else { 0.14 }))
             .on_press(move |s: &mut State| s.picked[i] = !s.picked[i])
-            .child(text(k.c.clone()).font(jp(s, 22.0)).color(if on { INK } else { W }))
+            .child(text(k.c.clone()).font(jp(s, 22.0)).color(if on { inv() } else { fg() }))
     }));
     let n = s.picked.iter().enumerate().filter(|(k, on)| **on && level_on(s, KANJI[*k].n)).count();
-    let panel = glass().key("pick").w(680.0).gap(16.0).fill(rgb(0x1A1433).alpha(0.75)).modal(true, close)
+    let panel = glass().key("pick").w(680.0).gap(16.0).fill(surface()).modal(true, close)
         .child(row().w_full().items_center().justify_between()
             .child(col().gap(2.0)
-                .child(text("Pick kanji").font(TextStyle::new(20.0, 600.0)).color(W))
+                .child(text("Pick kanji").font(TextStyle::new(20.0, 600.0)).color(fg()))
                 .child(text(if n == 0 { "None picked: every kanji in your levels is used.".to_string() } else { format!("{n} picked: words using any of them.") })
-                    .font(SMALL).color(W.alpha(0.6))))
+                    .font(SMALL).color(fg().alpha(0.6))))
             .child(row().gap(8.0)
                 .child(chip("pick-none".into(), "Clear", false, |s: &mut State| s.picked.fill(false)))
                 .child(chip("pick-done".into(), "Done", true, close))))
         .child(col().w_full().h(420.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(grid));
-    col().absolute(0.0, 0.0).w_full().h_full().center().fill(Color::BLACK.alpha(0.45)).child(panel)
+    col().absolute(0.0, 0.0).w_full().h_full().center().fill(scrim()).child(panel)
 }
 
 fn play(s: &State) -> El {
@@ -463,40 +531,40 @@ fn play(s: &State) -> El {
     let left = if practice { elapsed } else { limit - elapsed };
     let frac = if practice { 1.0 } else { (left / limit).clamp(0.0, 1.0) as f32 };
     let urgent = !practice && left < 10.0;
-    let bar = row().w_full().h(6.0).radius(3.0).fill(W.alpha(0.1))
+    let bar = row().w_full().h(6.0).radius(3.0).fill(fg().alpha(0.1))
         .child(el().h(6.0).radius(3.0).grow(frac.max(0.001))
-            .linear_gradient(PI / 2.0, if urgent { [(0.0, SHU), (1.0, rgb(0xFFB36B))] } else { [(0.0, SAKURA), (1.0, rgb(0xB59CFF))] }))
+            .linear_gradient(PI / 2.0, if urgent { [(0.0, SHU), (1.0, rgb(0xFFB36B))] } else { [(0.0, ACCENT), (1.0, rgb(0xB59CFF))] }))
         .child(el().grow(1.0 - frac));
     let top = row().w_full().items_center().justify_between()
         .child(row().gap(12.0).items_center()
-            .child(text(clock(left)).font(NUM).color(if urgent { SHU } else { W }))
-            .child(text(if practice { "practice · no clock" } else { "" }).font(SMALL).color(W.alpha(0.5))))
-        .child(text(format!("{} / {}", s.pos, s.deck.len())).font(NUM).color(W.alpha(0.8)));
+            .child(text(clock(left)).font(num()).color(if urgent { SHU } else { fg() }))
+            .child(text(if practice { "practice · no clock" } else { "" }).font(SMALL).color(fg().alpha(0.5))))
+        .child(text(format!("{} / {}", s.pos, s.deck.len())).font(num()).color(fg().alpha(0.8)));
 
     let card = s.deck[s.pos.min(s.deck.len() - 1)];
     let typed = if s.input.is_empty() { "·".to_string() } else { s.input.clone() };
     let main = glass().key("card").w(320.0).h(300.0).center().gap(6.0)
-        .border(1.0, if s.wrong { SHU.alpha(0.9) } else { W.alpha(0.18) })
-        .child(text(shown(card)).font(jp(s, match shown(card).chars().count() { 1 => 150.0, 2 => 112.0, 3 => 84.0, _ => 62.0 })).color(W));
+        .border(1.0, if s.wrong { SHU.alpha(0.9) } else { fg().alpha(0.18) })
+        .child(text(shown(card)).font(jp(s, match shown(card).chars().count() { 1 => 150.0, 2 => 112.0, 3 => 84.0, _ => 62.0 })).color(fg()));
     let next = col().gap(14.0).items_center().children(s.deck.iter().skip(s.pos + 1).take(5).enumerate().map(|(i, c)| {
-        text(shown(*c)).font(jp(s, 34.0 - i as f32 * 3.0)).color(W.alpha(0.5 - i as f32 * 0.08))
+        text(shown(*c)).font(jp(s, 34.0 - i as f32 * 3.0)).color(fg().alpha(0.5 - i as f32 * 0.08))
     }));
     col().w_full().max_w(620.0).gap(26.0).items_center()
         .child(col().w_full().gap(12.0).child(top).child(bar.opacity(if practice { 0.35 } else { 1.0 })))
         .child(row().gap(36.0).items_center().child(main).child(next))
         .child(col().items_center().gap(6.0)
-            .child(text(typed).font(TYPED).color(if s.input.is_empty() { W.alpha(0.3) } else { W }))
-            .child(el().w(160.0).h(2.0).radius(1.0).fill(W.alpha(0.3)))
+            .child(text(typed).font(TYPED).color(if s.input.is_empty() { fg().alpha(0.3) } else { fg() }))
+            .child(el().w(160.0).h(2.0).radius(1.0).fill(fg().alpha(0.3)))
             // What you've typed, as kana: your own input, not the answer.
             .child(text(if vocab_round(s) { let (k, rest) = vocab::to_kana(&s.input); format!("{k}{rest} ") } else { " ".into() })
-                .font(jp(s, 18.0)).color(W.alpha(0.55))))
-        .child(text(if vocab_round(s) { "Enter checks · Space skips · Esc quits" } else { "Space skips · Esc quits" }).font(SMALL).color(W.alpha(0.4)))
+                .font(jp(s, 18.0)).color(fg().alpha(0.55))))
+        .child(text(if vocab_round(s) { "Enter checks · Space skips · Esc quits" } else { "Space skips · Esc quits" }).font(SMALL).color(fg().alpha(0.4)))
 }
 
 fn done(s: &State) -> El {
     let mins = (s.ended / 60.0).max(1.0 / 60.0);
     let acc = if s.keys == 0 { 100.0 } else { 100.0 * (s.keys - s.bad_keys) as f64 / s.keys as f64 };
-    let tile = |name: &str, v: String| col().grow(1.0).gap(6.0).items_center().child(caps(name)).child(text(v).font(NUM).color(W));
+    let tile = |name: &str, v: String| col().grow(1.0).gap(6.0).items_center().child(caps(name)).child(text(v).font(num()).color(fg()));
     let stats = glass().w_full().child(row().w_full()
         .child(tile("Correct", format!("{}/{}", s.pos - s.skips, s.deck.len())))
         .child(tile("Time", words(s.ended)))
@@ -507,9 +575,9 @@ fn done(s: &State) -> El {
         .child(row().flex_wrap().gap(8.0).children(s.missed.iter().map(|c| {
             let (reading, meaning) = match c { Card::Kana(i, _) => (TABLE[*i].roma[0].to_string(), String::new()), Card::Word(i) => (WORDS[*i].r.clone(), WORDS[*i].m.clone()) };
             row().h(40.0).px(14.0).gap(8.0).items_center().radius(20.0).fill(SHU.alpha(0.16)).border(1.0, SHU.alpha(0.4))
-                .child(text(shown(*c)).font(jp(s, 20.0)).color(W))
-                .child(text(reading).font(jp(s, 14.0)).color(W.alpha(0.8)))
-                .child(text(meaning).font(SMALL).color(W.alpha(0.6)).max_w(320.0).truncate())
+                .child(text(shown(*c)).font(jp(s, 20.0)).color(fg()))
+                .child(text(reading).font(jp(s, 14.0)).color(fg().alpha(0.8)))
+                .child(text(meaning).font(SMALL).color(fg().alpha(0.6)).max_w(320.0).truncate())
         })));
     let mut buttons = row().gap(12.0).child(button("retry", "Retry", true, |s: &mut State| { let d = full_deck(s); start(s, d) }));
     if !s.missed.is_empty() {
@@ -518,9 +586,9 @@ fn done(s: &State) -> El {
     buttons = buttons.child(button("menu", "Menu", false, |s: &mut State| s.screen = Screen::Menu));
     col().w_full().max_w(620.0).gap(22.0)
         .child(col().gap(6.0)
-            .child(text(if s.cleared { "全部 Cleared!" } else { "Time's up" }).font(HERO).color(if s.cleared { MATCHA } else { W }))
+            .child(text(if s.cleared { "全部 Cleared!" } else { "Time's up" }).font(hero()).wrap().color(fg()))
             .child(text(if s.cleared { "Every card done inside the limit. Try a shorter clock." } else { "Keep going: review the misses, then go again." })
-                .font(BODY).color(W.alpha(0.6))))
+                .font(BODY).color(fg().alpha(0.6))))
         .child(stats)
         .child(missed)
         .child(buttons)
@@ -536,34 +604,43 @@ fn fonts_dialog(s: &State) -> El {
         chip_in(format!("jp-font-{i}"), &format!("{name}  あア"), TextStyle::new(14.0, 400.0).family(Family::Named(fam)), s.jp_font == i,
             move |s: &mut State, _: &mut Tx| s.jp_font = i)
     }).collect::<Vec<_>>();
-    let panel = glass().key("fonts").w(440.0).gap(20.0).fill(rgb(0x1A1433).alpha(0.7)).modal(true, close)
+    let panel = glass().key("fonts").w(440.0).gap(20.0).fill(surface()).modal(true, close)
         .child(row().w_full().items_center().justify_between()
-            .child(text("Fonts").font(TextStyle::new(20.0, 600.0)).color(W))
+            .child(text("Fonts").font(TextStyle::new(20.0, 600.0)).color(fg()))
             .child(chip("fonts-done".into(), "Done", false, close)))
         .child(col().gap(10.0).child(caps("Interface")).child(row().flex_wrap().gap(8.0).children(ui)))
         .child(col().gap(10.0).child(caps("Japanese")).child(row().flex_wrap().gap(8.0).children(ja)))
-        .child(col().w_full().gap(4.0).padding(16.0).radius(16.0).fill(W.alpha(0.06))
-            .child(text("あいうえお かきくけこ").font(jp(s, 28.0)).color(W))
-            .child(text("アイウエオ きゃ しゅ ちょ").font(jp(s, 28.0)).color(W.alpha(0.8)))
-            .child(text("The quick kana drill · 0123456789").font(BODY).color(W.alpha(0.6))));
-    col().absolute(0.0, 0.0).w_full().h_full().center().fill(Color::BLACK.alpha(0.45)).child(panel)
+        .child(col().w_full().gap(4.0).padding(16.0).radius(16.0).fill(fg().alpha(0.06))
+            .child(text("あいうえお かきくけこ").font(jp(s, 28.0)).color(fg()))
+            .child(text("アイウエオ きゃ しゅ ちょ").font(jp(s, 28.0)).color(fg().alpha(0.8)))
+            .child(text("The quick kana drill · 0123456789").font(BODY).color(fg().alpha(0.6))));
+    col().absolute(0.0, 0.0).w_full().h_full().center().fill(scrim()).child(panel)
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
-    let orb = |x: f32, y: f32, d: f32, c: Color| el().size(d, d).absolute(x, y)
-        .radial_gradient([0.5, 0.5], d / 2.0, [(0.0, c.alpha(0.6)), (0.6, c.alpha(0.18)), (1.0, c.alpha(0.0))]);
+/// The app icon: ま on the dark grain gradient. Full bleed; packaging rounds the corners.
+fn icon(s: &State) -> El {
+    col().w_full().h_full().center().fill(Color::BLACK)
+        .child(el().absolute(0.0, 0.0).w_full().h_full().pixels_fit(&BG[0], SurfaceFit::Fill))
+        .child(text("ま").font(TextStyle { weight: 500.0, ..jp(s, 300.0) }).color(rgb(0xF4F1EC)))
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let light = match s.theme { 0 => !cx.system_dark(), t => t == 1 };
+    LIGHT.store(light, Ordering::Relaxed);
+    if s.icon { return icon(s) }
     let body = match s.screen { Screen::Menu => menu(s), Screen::Play => play(s), Screen::Done => done(s) };
-    let root = col().w_full().h_full().linear_gradient(PI, [(0.0, rgb(0x0E0A22)), (1.0, rgb(0x2A1745))])
-        .child(orb(-160.0, -140.0, 520.0, SHU))
-        .child(orb(560.0, 260.0, 560.0, rgb(0x7B5CFF)))
-        .child(orb(200.0, 520.0, 420.0, SAKURA))
+    let root = col().w_full().h_full().fill(if light { rgb(0xF4F1EC) } else { Color::BLACK })
+        .child(el().absolute(0.0, 0.0).w_full().h_full().pixels_fit(&BG[light as usize], SurfaceFit::Fill))
         .child(col().w_full().h_full().padding(28.0).gap(24.0)
             .child(row().w_full().items_center().justify_between()
                 .child(logo(s))
                 .child(if s.screen == Screen::Menu {
-                    chip("fonts-open".into(), "Aa  Fonts", false, |s: &mut State| s.fonts_open = true)
+                    row().gap(8.0)
+                        .child(chip("theme-light".into(), "Light", light, |s: &mut State| s.theme = 1))
+                        .child(chip("theme-dark".into(), "Dark", !light, |s: &mut State| s.theme = 2))
+                        .child(chip("fonts-open".into(), "Aa  Fonts", false, |s: &mut State| s.fonts_open = true))
                 } else {
-                    text("かな · カナ").font(jp(s, 13.0)).color(W.alpha(0.5))
+                    text("かな · カナ").font(jp(s, 13.0)).color(fg().alpha(0.5))
                 }))
             .child(col().w_full().grow(1.0).min_h(0.0).items_center().justify_center().child(body)));
     match s.screen {
@@ -580,11 +657,12 @@ fn fake_progress(s: &mut State) {
     for (i, k) in TABLE.iter().enumerate().take(30) { for n in 0..4 { s.progress.record(format!("kana:{}", k.kana), (i + n) % 5 != 0 || i < 10, d) } }
     for w in WORDS.iter().take(120) { s.progress.record(format!("word:{}", w.w), w.r.len() % 3 != 0, d) }
     for (i, back) in [3u32, 2, 1, 0].into_iter().enumerate() {
-        s.progress.add_run(Run { day: d - back, drill: if i % 2 == 0 { "kana".into() } else { "vocab".into() }, right: 18 + i, total: 20, secs: 65.0 + i as f64 * 9.0 });
+        s.progress.add_run(Run { day: d - back, drill: if i % 2 == 0 { "kana".into() } else { "vocab".into() }, right: 16 + i, total: 20, secs: 65.0 + i as f64 * 9.0 });
     }
 }
 
 fn main() {
+    rune::set_app_id(store::APP_ID); // Linux: matches dev.maitodesu.maijp.desktop, which names the icon
     rune::run(AppSpec::<State> {
         fonts: &[
             include_bytes!("../assets/Geist-Light.ttf"),
@@ -597,6 +675,10 @@ fn main() {
             include_bytes!("../assets/Inter-Regular.ttf"),
             include_bytes!("../assets/Inter-Medium.ttf"),
             include_bytes!("../assets/Inter-SemiBold.ttf"),
+            // Subset to the characters maijp shows (kana, its kanji and words, UI text), so every OS draws the same.
+            include_bytes!("../assets/NotoSansJP.ttf"),
+            include_bytes!("../assets/NotoSerifJP.ttf"),
+            include_bytes!("../assets/InstrumentSerif-Regular.ttf"),
         ],
         families: ("Geist", "Geist Mono"),
         setup: Some(setup),
@@ -606,6 +688,13 @@ fn main() {
         scenes: &[
             ("play", |s| { s.sets = [true, true, true]; let d = full_deck(s); start(s, d); s.input = "k".into(); }),
             ("practice", |s| { s.limit = 4; let d = full_deck(s); start(s, d); s.now = 42.0; s.started = 0.0; }),
+            ("light", |s| s.theme = 1),
+            ("icon", |s| { s.icon = true; s.jp_font = 1 }),
+            ("inter", |s| s.ui_font = 1),
+            ("dark", |s| s.theme = 2),
+            ("light-play", |s| { s.theme = 1; s.sets = [true, true, true]; let d = full_deck(s); start(s, d); s.input = "k".into(); }),
+            ("light-study", |s| { s.theme = 1; s.drill = Drill::Study; s.study_tab = 1; fake_progress(s); }),
+            ("light-card", |s| { s.theme = 1; s.drill = Drill::Study; s.study_tab = 1; fake_progress(s); s.study_open = KANJI.iter().position(|k| k.c == "学"); }),
             ("fonts", |s| { s.fonts_open = true; s.jp_font = 1; }),
             ("vocab", |s| { s.drill = Drill::Vocab; s.levels = [true, true, false, false, false]; }),
             ("vocab-play", |s| { s.drill = Drill::Vocab; let d = full_deck(s); start(s, d); s.input = "nihon".into(); }),

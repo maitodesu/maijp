@@ -19,12 +19,14 @@ pub struct Settings {
     pub picked: Vec<String>,
     pub ui_font: usize,
     pub jp_font: usize,
+    /// 0 follows the system, 1 light, 2 dark.
+    pub theme: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings { script: 0, sets: [true, false, false], limit: 1, levels: [true, false, false, false, false],
-            round: 0, picked: Vec::new(), ui_font: 0, jp_font: 0 }
+            round: 0, picked: Vec::new(), ui_font: 0, jp_font: 0, theme: 0 }
     }
 }
 

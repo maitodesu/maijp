@@ -25,7 +25,7 @@ fn kanji_score(s: &State, k: usize) -> (u32, u32) {
 fn tinted(c: El, t: Option<Color>) -> El {
     match t {
         Some(c2) => c.fill(c2.alpha(0.22)).border(1.0, c2.alpha(0.55)),
-        None => c.fill(W.alpha(0.06)).border(1.0, W.alpha(0.14)),
+        None => c.fill(fg().alpha(0.06)).border(1.0, fg().alpha(0.14)),
     }
 }
 
@@ -37,13 +37,13 @@ fn progress(s: &State) -> El {
     let (seen, right) = s.progress.totals();
     let acc = if seen == 0 { "–".to_string() } else { format!("{:.0}%", 100.0 * right as f64 / seen as f64) };
     let streak = s.progress.streak(today());
-    let tile = |name: &str, v: String| col().grow(1.0).gap(4.0).items_center().child(caps(name)).child(text(v).font(NUM).color(W));
+    let tile = |name: &str, v: String| col().grow(1.0).gap(4.0).items_center().child(caps(name)).child(text(v).font(num()).color(fg()));
     let recent = s.progress.history.iter().rev().take(5).map(|r| {
         row().w_full().items_center().gap(12.0).h(30.0)
-            .child(text(if r.drill == "vocab" { "JLPT vocab" } else { "Kana" }).font(BODY).color(W).w(110.0))
-            .child(text(format!("{}/{}", r.right, r.total)).font(BODY).color(W.alpha(0.85)).w(70.0))
-            .child(text(words(r.secs)).font(SMALL).color(W.alpha(0.6)).grow(1.0))
-            .child(text(ago(r.day)).font(SMALL).color(W.alpha(0.5)))
+            .child(text(if r.drill == "vocab" { "JLPT vocab" } else { "Kana" }).font(BODY).color(fg()).w(110.0))
+            .child(text(format!("{}/{}", r.right, r.total)).font(BODY).color(fg().alpha(0.85)).w(70.0))
+            .child(text(words(r.secs)).font(SMALL).color(fg().alpha(0.6)).grow(1.0))
+            .child(text(ago(r.day)).font(SMALL).color(fg().alpha(0.5)))
     }).collect::<Vec<_>>();
     let mut card = glass().w_full().gap(18.0)
         .child(row().w_full()
@@ -52,7 +52,7 @@ fn progress(s: &State) -> El {
             .child(tile("Accuracy", acc))
             .child(tile("Rounds", s.progress.history.len().to_string())));
     card = if recent.is_empty() {
-        card.child(text("No rounds yet. Study a little, then try a drill.").font(SMALL).color(W.alpha(0.55)))
+        card.child(text("No rounds yet. Study a little, then try a drill.").font(SMALL).color(fg().alpha(0.55)))
     } else {
         card.child(col().w_full().gap(2.0).child(caps("Recent")).children(recent))
     };
@@ -62,7 +62,7 @@ fn progress(s: &State) -> El {
 fn legend() -> El {
     let dot = |c: Option<Color>, label: &str| row().gap(6.0).items_center()
         .child(tinted(el().size(12.0, 12.0).radius(4.0), c))
-        .child(text(label.to_string()).font(SMALL).color(W.alpha(0.6)));
+        .child(text(label.to_string()).font(SMALL).color(fg().alpha(0.6)));
     row().gap(16.0).flex_wrap()
         .child(dot(None, "new")).child(dot(Some(SHU), "shaky")).child(dot(Some(AMBER), "learning")).child(dot(Some(MATCHA), "solid"))
 }
@@ -73,8 +73,8 @@ fn kana_cell(s: &State, i: Option<usize>) -> El {
     let k = shown(card);
     let t = stat(s, &format!("kana:{k}")).and_then(|st| tone(st.seen, st.right));
     tinted(col().size(58.0, 66.0).radius(14.0).center().gap(2.0), t)
-        .child(text(k).font(jp(s, if TABLE[i].kana.chars().count() > 1 { 20.0 } else { 26.0 })).color(W))
-        .child(text(TABLE[i].roma[0]).font(TextStyle::new(11.0, 500.0)).color(W.alpha(0.6)))
+        .child(text(k).font(jp(s, if TABLE[i].kana.chars().count() > 1 { 20.0 } else { 26.0 })).color(fg()))
+        .child(text(TABLE[i].roma[0]).font(TextStyle::new(11.0, 500.0)).color(fg().alpha(0.6)))
 }
 
 fn grid(s: &State, rows: Vec<Vec<Option<usize>>>) -> El {
@@ -118,13 +118,13 @@ fn kanji_browser(s: &State) -> El {
         tinted(col().key(format!("sk-{i}")).role("button").label(format!("{} {}", KANJI[i].c, KANJI[i].m)).focusable(true)
             .size(48.0, 48.0).radius(12.0).center().press_scale(0.94), tone(seen, right))
             .on_press(move |s: &mut State| s.study_open = Some(i))
-            .child(text(KANJI[i].c.clone()).font(jp(s, 24.0)).color(W))
+            .child(text(KANJI[i].c.clone()).font(jp(s, 24.0)).color(fg()))
     }).collect::<Vec<_>>();
     glass().w_full().gap(16.0)
         .child(row().w_full().items_center().justify_between()
             .child(row().gap(8.0).children(levels))
             .child(legend()))
-        .child(text(format!("{} kanji · {solid} solid · tap one to study it", ks.len())).font(SMALL).color(W.alpha(0.6)))
+        .child(text(format!("{} kanji · {solid} solid · tap one to study it", ks.len())).font(SMALL).color(fg().alpha(0.6)))
         .child(row().w_full().flex_wrap().gap(6.0).children(cells))
 }
 
@@ -135,8 +135,8 @@ pub fn view(s: &State, tabs: El) -> El {
     let page = col().w_full().max_w(760.0).gap(22.0).padding(4.0)
         .child(tabs.w_full())
         .child(col().gap(8.0)
-            .child(text("Learn first, drill after.").font(HERO).color(W))
-            .child(text("Browse the kana and JLPT kanji. Colours show how well you know each one from your drills.").font(BODY).color(W.alpha(0.6))))
+            .child(text("Learn first, drill after.").font(hero()).wrap().color(fg()))
+            .child(text("Browse the kana and JLPT kanji. Colours show how well you know each one from your drills.").font(BODY).color(fg().alpha(0.6))))
         .child(progress(s))
         .child(sub)
         .child(if s.study_tab == 0 { kana_chart(s) } else { kanji_browser(s) })
@@ -151,20 +151,20 @@ pub fn kanji_card(s: &State) -> El {
     let close = |s: &mut State| s.study_open = None;
     let readings = |label: &str, r: &[String]| row().gap(10.0).items_center()
         .child(caps(label).w(34.0))
-        .child(text(if r.is_empty() { "–".to_string() } else { r.join("・") }).font(jp(s, 17.0)).color(W).max_w(380.0).wrap());
+        .child(text(if r.is_empty() { "–".to_string() } else { r.join("・") }).font(jp(s, 17.0)).color(fg()).max_w(380.0).wrap());
     let (seen, right) = kanji_score(s, i);
     let words = KANJI_WORDS[i].iter().take(12).map(|&w| {
         let word = &WORDS[w];
         let score = stat(s, &format!("word:{}", word.w)).map_or("new".to_string(), |st| format!("{}/{}", st.right, st.seen));
         row().w_full().h(40.0).gap(14.0).items_center()
-            .child(text(word.w.clone()).font(jp(s, 20.0)).color(W).w(130.0))
-            .child(text(word.r.clone()).font(jp(s, 14.0)).color(W.alpha(0.8)).w(130.0))
-            .child(text(word.m.clone()).font(SMALL).color(W.alpha(0.6)).grow(1.0).min_w(0.0).truncate())
-            .child(text(score).font(SMALL).color(W.alpha(0.5)))
+            .child(text(word.w.clone()).font(jp(s, 20.0)).color(fg()).w(130.0))
+            .child(text(word.r.clone()).font(jp(s, 14.0)).color(fg().alpha(0.8)).w(130.0))
+            .child(text(word.m.clone()).font(SMALL).color(fg().alpha(0.6)).grow(1.0).min_w(0.0).truncate())
+            .child(text(score).font(SMALL).color(fg().alpha(0.5)))
     }).collect::<Vec<_>>();
     let deck: Vec<Card> = top_words(i, |_| true).into_iter().map(Card::Word).collect();
     let drill = if deck.is_empty() {
-        text("No vocab for this kanji yet").font(SMALL).color(W.alpha(0.5))
+        text("No vocab for this kanji yet").font(SMALL).color(fg().alpha(0.5))
     } else {
         button("study-drill", &format!("Drill its top {} words", deck.len()), true, move |s: &mut State| {
             s.study_open = None;
@@ -172,19 +172,19 @@ pub fn kanji_card(s: &State) -> El {
             start(s, deck.clone());
         })
     };
-    let panel = glass().key("kanji-card").w(640.0).gap(18.0).fill(rgb(0x1A1433).alpha(0.75)).modal(true, close)
+    let panel = glass().key("kanji-card").w(640.0).gap(18.0).fill(surface()).modal(true, close)
         .child(row().w_full().gap(24.0).items_start()
             .child(tinted(col().size(140.0, 140.0).radius(24.0).center(), tone(seen, right))
-                .child(text(k.c.clone()).font(jp(s, 96.0)).color(W)))
+                .child(text(k.c.clone()).font(jp(s, 96.0)).color(fg())))
             .child(col().grow(1.0).gap(10.0)
                 .child(row().w_full().items_center().justify_between()
-                    .child(text(format!("N{}", k.n)).font(CAPS).color(SAKURA))
+                    .child(text(format!("N{}", k.n)).font(CAPS).color(ACCENT))
                     .child(chip("kanji-close".into(), "Close", false, close)))
-                .child(text(k.m.clone()).font(TextStyle::new(20.0, 600.0)).color(W).wrap())
+                .child(text(k.m.clone()).font(TextStyle::new(20.0, 600.0)).color(fg()).wrap())
                 .child(readings("On", &k.on))
                 .child(readings("Kun", &k.kun))
-                .child(text(if seen == 0 { "Not drilled yet".to_string() } else { format!("{right}/{seen} right in drills") }).font(SMALL).color(W.alpha(0.55)))))
+                .child(text(if seen == 0 { "Not drilled yet".to_string() } else { format!("{right}/{seen} right in drills") }).font(SMALL).color(fg().alpha(0.55)))))
         .child(col().w_full().gap(4.0).child(caps("Words")).child(col().w_full().h(280.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(col().w_full().children(words))))
         .child(drill);
-    col().absolute(0.0, 0.0).w_full().h_full().center().fill(Color::BLACK.alpha(0.45)).child(panel)
+    col().absolute(0.0, 0.0).w_full().h_full().center().fill(scrim()).child(panel)
 }
