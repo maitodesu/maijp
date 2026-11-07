@@ -7,7 +7,12 @@ use std::time::Duration;
 
 use rune::{AppSpec, Color, Cx, El, Family, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row, text};
 
+mod store;
+mod study;
 mod vocab;
+use rune::Waker;
+use rune::prefs::Prefs;
+use store::{Progress, Run, Settings, today};
 use vocab::{KANJI, WORDS};
 
 // ---------- kana table: a kana token, then its accepted romaji ----------
@@ -56,7 +61,7 @@ enum Card { Kana(usize, bool), Word(usize) }
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum Screen { Menu, Play, Done }
 #[derive(PartialEq, Clone, Copy, Debug)]
-enum Drill { Kana, Vocab }
+enum Drill { Kana, Vocab, Study }
 
 const SCRIPTS: [&str; 3] = ["Hiragana", "Katakana", "Both"];
 const SETS: [(&str, &str); 3] = [("Basic", "46 五十音"), ("Dakuten", "25 が ぱ"), ("Combos", "33 きゃ しゅ")];
@@ -98,6 +103,17 @@ struct State {
     ui_font: usize,
     jp_font: usize,
     fonts_open: bool,
+    prefs: Prefs,
+    progress: Progress,
+    /// Settings as last written, so poll only saves real changes.
+    saved: Settings,
+    fonts_applied: bool,
+    /// Study: 0 kana chart, 1 kanji browser.
+    study_tab: usize,
+    study_kata: bool,
+    study_level: u8,
+    /// Kanji whose detail card is open.
+    study_open: Option<usize>,
 }
 
 fn init() -> State {
@@ -106,7 +122,47 @@ fn init() -> State {
         picked: vec![false; KANJI.len()], pick_open: false, script: 0, sets: [true, false, false], limit: 1, deck: Vec::new(), pos: 0,
         input: String::new(), wrong: false, swallow_n: false, keys: 0, bad_keys: 0, skips: 0, missed: Vec::new(),
         started: 0.0, now: 0.0, ended: 0.0, cleared: false, seed,
-        ui_font: 0, jp_font: 0, fonts_open: false }
+        ui_font: 0, jp_font: 0, fonts_open: false,
+        prefs: Prefs::memory(), progress: Progress::default(), saved: Settings::default(), fonts_applied: false,
+        study_tab: 0, study_kata: false, study_level: 5, study_open: None }
+}
+
+fn settings(s: &State) -> Settings {
+    Settings { script: s.script, sets: s.sets, limit: s.limit, levels: s.levels, round: s.round,
+        picked: s.picked.iter().enumerate().filter(|(_, on)| **on).map(|(i, _)| KANJI[i].c.clone()).collect(),
+        ui_font: s.ui_font, jp_font: s.jp_font }
+}
+
+/// Loads what was saved last time. Indexes are clamped: an older build may have had fewer options.
+fn setup(s: &mut State, _: Waker) {
+    // Headless snapshots keep their scene's state and never touch the real save.
+    if std::env::args().any(|a| a == "--snap") { return }
+    s.prefs = Prefs::open(store::APP_ID);
+    let st: Settings = s.prefs.get("settings").unwrap_or_default();
+    s.script = st.script.min(SCRIPTS.len() - 1);
+    s.sets = if st.sets.contains(&true) { st.sets } else { Settings::default().sets };
+    s.limit = st.limit.min(LIMITS.len() - 1);
+    s.levels = if st.levels.contains(&true) { st.levels } else { Settings::default().levels };
+    s.round = st.round.min(ROUNDS.len() - 1);
+    for c in &st.picked { if let Some(i) = KANJI.iter().position(|k| &k.c == c) { s.picked[i] = true } }
+    s.ui_font = st.ui_font.min(UI_FONTS.len() - 1);
+    s.jp_font = st.jp_font.min(JP_FONTS.len() - 1);
+    s.saved = settings(s);
+    s.progress = s.prefs.get("progress").unwrap_or_default();
+}
+
+fn card_key(card: Card) -> String {
+    match card { Card::Kana(..) => format!("kana:{}", shown(card)), Card::Word(i) => format!("word:{}", WORDS[i].w) }
+}
+
+/// A card is done: right means first try, no misses, no skip.
+fn advance(s: &mut State, right: bool) {
+    let card = s.deck[s.pos];
+    s.progress.record(card_key(card), right && !s.missed.contains(&card), today());
+    s.input.clear();
+    s.wrong = false;
+    s.pos += 1;
+    if s.pos == s.deck.len() { finish(s, true) }
 }
 
 fn level_on(s: &State, n: u8) -> bool { s.levels[5 - n as usize] }
@@ -139,6 +195,9 @@ fn finish(s: &mut State, cleared: bool) {
     s.screen = Screen::Done;
     s.cleared = cleared;
     s.ended = (s.now - s.started).clamp(0.0, LIMITS[s.limit]);
+    let drill = if s.drill == Drill::Vocab { "vocab" } else { "kana" };
+    s.progress.add_run(Run { day: today(), drill: drill.into(), right: s.pos - s.skips, total: s.deck.len(), secs: s.ended });
+    s.prefs.set("progress", &s.progress).ok(); // shortcut: a failed save is dropped silently, surface it if users report lost progress
 }
 
 fn type_char(s: &mut State, c: char) {
@@ -151,10 +210,7 @@ fn type_char(s: &mut State, c: char) {
     let roma = &TABLE[i].roma;
     if roma.iter().any(|r| *r == s.input) {
         s.swallow_n = s.input == "n";
-        s.input.clear();
-        s.wrong = false;
-        s.pos += 1;
-        if s.pos == s.deck.len() { finish(s, true) }
+        advance(s, true);
     } else if !roma.iter().any(|r| r.starts_with(s.input.as_str())) {
         s.bad_keys += 1;
         s.input.clear();
@@ -170,10 +226,7 @@ fn submit(s: &mut State) {
     if s.input.is_empty() { return }
     s.keys += 1;
     if vocab::is_reading(&WORDS[i], &s.input) {
-        s.input.clear();
-        s.wrong = false;
-        s.pos += 1;
-        if s.pos == s.deck.len() { finish(s, true) }
+        advance(s, true);
     } else {
         s.bad_keys += 1;
         s.input.clear();
@@ -191,10 +244,7 @@ fn skip(s: &mut State) {
     s.skips += 1;
     s.keys += 1; // a skip is a failed attempt
     s.bad_keys += 1;
-    s.input.clear();
-    s.wrong = false;
-    s.pos += 1;
-    if s.pos == s.deck.len() { finish(s, true) }
+    advance(s, false);
 }
 
 fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
@@ -213,7 +263,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
         }
         (Screen::Play, Key::Backspace) => { s.input.pop(); }
         (Screen::Play | Screen::Done, Key::Escape) => s.screen = Screen::Menu,
-        (Screen::Menu, _) if s.fonts_open || s.pick_open => return false,
+        (Screen::Menu, _) if s.fonts_open || s.pick_open || s.study_open.is_some() || s.drill == Drill::Study => return false,
         (Screen::Menu | Screen::Done, Key::Enter) => { let d = full_deck(s); start(s, d) }
         _ => return false,
     }
@@ -222,7 +272,15 @@ fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
 
 fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
     s.now = t;
-    if s.screen != Screen::Play { return false }
+    if !s.fonts_applied {
+        s.fonts_applied = true;
+        if s.ui_font != 0 { tx.set_font_families(UI_FONTS[s.ui_font].1, "Geist Mono") }
+    }
+    if s.screen != Screen::Play {
+        let now = settings(s);
+        if now != s.saved { s.prefs.set("settings", &now).ok(); s.saved = now; }
+        return false;
+    }
     if s.started < 0.0 { s.started = t }
     if t - s.started >= LIMITS[s.limit] { finish(s, false) } else { tx.wake_after(Duration::from_millis(50)) }
     true
@@ -317,7 +375,11 @@ fn menu(s: &State) -> El {
     let n = full_deck(s).len();
     let tabs = row().gap(8.0)
         .child(chip_in("tab-kana".into(), "Kana  かな", jp(s, 14.0), s.drill == Drill::Kana, |s: &mut State, _: &mut Tx| s.drill = Drill::Kana))
-        .child(chip_in("tab-vocab".into(), "JLPT vocab  漢字", jp(s, 14.0), s.drill == Drill::Vocab, |s: &mut State, _: &mut Tx| s.drill = Drill::Vocab));
+        .child(chip_in("tab-vocab".into(), "JLPT vocab  漢字", jp(s, 14.0), s.drill == Drill::Vocab, |s: &mut State, _: &mut Tx| s.drill = Drill::Vocab))
+        .child(chip_in("tab-study".into(), "Study  学ぶ", jp(s, 14.0), s.drill == Drill::Study, |s: &mut State, _: &mut Tx| s.drill = Drill::Study));
+    if s.drill == Drill::Study { return study::view(s, tabs) }
+    let streak = s.progress.streak(today());
+    let tabs = tabs.child(el().grow(1.0)).child(text(if streak > 0 { format!("{streak}-day streak") } else { String::new() }).font(SMALL).color(SAKURA));
     let (title, sub, panel, count) = if s.drill == Drill::Kana {
         ("Type every kana before the clock runs out.",
          "Romaji in, kana out. No hints: a wrong key flashes red. Space skips (counts as a miss).",
@@ -349,8 +411,8 @@ fn menu(s: &State) -> El {
              .child(group("Words per round", rounds)).child(group("Time limit", limits)),
          format!("{} words · press Enter", n.min(ROUNDS[s.round])))
     };
-    col().w_full().max_w(620.0).gap(24.0)
-        .child(tabs)
+    col().w_full().max_w(680.0).gap(24.0)
+        .child(tabs.w_full())
         .child(col().gap(8.0)
             .child(text(title).font(HERO).color(W))
             .child(text(sub).font(BODY).color(W.alpha(0.6))))
@@ -493,11 +555,22 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 } else {
                     text("かな · カナ").font(jp(s, 13.0)).color(W.alpha(0.5))
                 }))
-            .child(col().w_full().grow(1.0).items_center().justify_center().child(body)));
+            .child(col().w_full().grow(1.0).min_h(0.0).items_center().justify_center().child(body)));
     match s.screen {
         Screen::Menu if s.fonts_open => root.child(fonts_dialog(s)),
         Screen::Menu if s.pick_open => root.child(pick_dialog(s)),
+        Screen::Menu if s.drill == Drill::Study && s.study_open.is_some() => root.child(study::kanji_card(s)),
         _ => root,
+    }
+}
+
+/// Some made-up history for snapshot scenes.
+fn fake_progress(s: &mut State) {
+    let d = today();
+    for (i, k) in TABLE.iter().enumerate().take(30) { for n in 0..4 { s.progress.record(format!("kana:{}", k.kana), (i + n) % 5 != 0 || i < 10, d) } }
+    for w in WORDS.iter().take(120) { s.progress.record(format!("word:{}", w.w), w.r.len() % 3 != 0, d) }
+    for (i, back) in [3u32, 2, 1, 0].into_iter().enumerate() {
+        s.progress.add_run(Run { day: d - back, drill: if i % 2 == 0 { "kana".into() } else { "vocab".into() }, right: 18 + i, total: 20, secs: 65.0 + i as f64 * 9.0 });
     }
 }
 
@@ -516,6 +589,7 @@ fn main() {
             include_bytes!("../assets/Inter-SemiBold.ttf"),
         ],
         families: ("Geist", "Geist Mono"),
+        setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
         min_size: Some((760.0, 720.0)),
@@ -532,6 +606,9 @@ fn main() {
                 for _ in 0..3 { skip(s) }
                 s.limit = 2; s.started = 0.0; s.now = 75.0; finish(s, false);
             }),
+            ("study", |s| { s.drill = Drill::Study; fake_progress(s); }),
+            ("study-kanji", |s| { s.drill = Drill::Study; s.study_tab = 1; fake_progress(s); }),
+            ("kanji-card", |s| { s.drill = Drill::Study; s.study_tab = 1; fake_progress(s); s.study_open = KANJI.iter().position(|k| k.c == "学"); }),
             ("miss", |s| { let d = full_deck(s); start(s, d); type_char(s, 'q'); }),
             ("done", |s| {
                 let d = full_deck(s); start(s, d);

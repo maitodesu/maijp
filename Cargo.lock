@@ -1451,6 +1451,7 @@ name = "maijp"
 version = "0.1.0"
 dependencies = [
  "rune",
+ "serde",
  "serde_json",
 ]
 

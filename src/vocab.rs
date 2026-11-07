@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub struct Kanji { pub c: String, pub n: u8, pub m: String }
+pub struct Kanji { pub c: String, pub n: u8, pub m: String, pub on: Vec<String>, pub kun: Vec<String> }
 pub struct Word { pub w: String, pub r: String, pub m: String, pub kanji: Vec<usize>, pub level: u8 }
 
 fn strs(v: &serde_json::Value) -> Vec<String> {
@@ -18,6 +18,8 @@ pub static KANJI: LazyLock<Vec<Kanji>> = LazyLock::new(|| {
         c: k["c"].as_str().unwrap_or_default().to_string(),
         n: k["n"].as_u64().unwrap_or(1) as u8,
         m: strs(&k["m"]).join(", "),
+        on: strs(&k["on"]),
+        kun: strs(&k["kun"]),
     }).collect()
 });
 
@@ -30,6 +32,13 @@ pub static WORDS: LazyLock<Vec<Word>> = LazyLock::new(|| {
         let level = kanji.iter().map(|&i| KANJI[i].n).min()?;
         Some(Word { w: w["w"].as_str()?.into(), r: norm(w["r"].as_str()?), m: strs(&w["m"]).join(", "), kanji, level })
     }).collect()
+});
+
+/// Words using each kanji, by KANJI index.
+pub static KANJI_WORDS: LazyLock<Vec<Vec<usize>>> = LazyLock::new(|| {
+    let mut by = vec![Vec::new(); KANJI.len()];
+    for (w, word) in WORDS.iter().enumerate() { for &k in &word.kanji { by[k].push(w) } }
+    by
 });
 
 /// Katakana to hiragana, and the spellings romaji can't tell apart (ぢ/じ, づ/ず) folded together.

@@ -4,6 +4,8 @@ A desktop app for drilling basic Japanese by typing fast. Built with [Rune](http
 
 - **Kana drill**: hiragana, katakana or both; basic 五十音, dakuten, and combos (きゃ, しゅ…). Type the romaji; each card advances as soon as it's right.
 - **JLPT vocab drill**: real vocabulary for the N5–N1 kanji. Pick levels, or hand-pick kanji. Type the word's reading in romaji and press Enter.
+- **Study**: a kana chart (五十音, dakuten, combos) and a JLPT kanji browser. Each kanji opens a card with meanings, on/kun readings, its words and your score on each, plus a "Drill its words" button. Colours show what you know: new, shaky, learning, solid.
+- **Progress is saved locally**: settings, fonts, picked kanji, per-card right/seen counts, round history and a day streak (JSON in your config dir: `~/.config/dev.maitodesu.maijp`, `%APPDATA%\dev.maitodesu.maijp` or `~/Library/Application Support/dev.maitodesu.maijp`).
 - No hints: a wrong answer only flashes red. Space skips (counts as a miss). Answers show on the results screen, with a "Review misses" round.
 - Time limits of 0:30 / 1:00 / 2:00 / 5:00, or ∞ practice with no clock.
 - Fonts dialog: Geist, Inter or Geist Mono for the interface; Noto Sans or Noto Serif CJK for Japanese.
