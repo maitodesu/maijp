@@ -1,5 +1,7 @@
 # maijp
 
+[![maijp in 10 seconds](docs/promo.gif)](docs/promo.mp4)
+
 A desktop app for drilling basic Japanese by typing fast. Built with [Rune](https://github.com/anomalyco/rune).
 
 - **Kana drill**: hiragana, katakana or both; basic 五十音, dakuten, and combos (きゃ, しゅ…). Type the romaji; each card advances as soon as it's right.
